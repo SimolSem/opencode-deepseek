@@ -78,6 +78,79 @@ def _annotate_bridge_failure(exc, detail=None):
     return exc
 
 
+# Settle metadata a tab may attach to a result (docs/BRIDGE_TRACE_STATS.ru.md):
+# counts and flags only, never response text. These keys are common to every
+# provider; _SETTLE_EXTRA lists the providers that report it and their own keys.
+_SETTLE_INT_KEYS = ("quiet_ms", "stable_ticks")
+_SETTLE_BOOL_KEYS = ("tool",)
+_SETTLE_SOURCE = frozenset({"wire", "dom"})
+_DOM_CHECK_INT_KEYS = ("similarity", "coverage", "changes", "stable_ms", "wire_len", "dom_len")
+_DOM_CHECK_BOOL_KEYS = ("found", "match", "exact", "tool_wire", "tool_dom")
+_DOM_CHECK_ENDED = frozenset({"next_job", "timeout"})
+
+
+def _bounded_int(value):
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0 or value > 10_000_000:
+        return None
+    return value
+
+
+def _copy_settle_keys(source, out, int_keys, bool_keys):
+    for key in int_keys:
+        bounded = _bounded_int(source.get(key))
+        if bounded is not None:
+            out[key] = bounded
+    for key in bool_keys:
+        if isinstance(source.get(key), bool):
+            out[key] = source[key]
+
+
+def _sanitize_late_rewrite(value):
+    if not isinstance(value, dict):
+        return None
+    out = {}
+    _copy_settle_keys(value, out, ("delay_ms",), ("tool_before", "tool_after"))
+    return out or None
+
+
+def _sanitize_dom_check(value):
+    if not isinstance(value, dict):
+        return None
+    out = {}
+    _copy_settle_keys(value, out, _DOM_CHECK_INT_KEYS, _DOM_CHECK_BOOL_KEYS)
+    if value.get("ended") in _DOM_CHECK_ENDED:
+        out["ended"] = value["ended"]
+    return out or None
+
+
+# Providers whose tab reports settle metadata -> adder of their own keys (or None).
+_SETTLE_EXTRA = {}
+
+
+def _sanitize_bridge_settle(provider, result):
+    """Whitelist settle/late_rewrite/dom_check metadata; never pass through free text."""
+    if provider not in _SETTLE_EXTRA or not isinstance(result, dict):
+        return None
+    out = {}
+    settle = result.get("settle")
+    if isinstance(settle, dict):
+        if settle.get("source") in _SETTLE_SOURCE:
+            out["source"] = settle["source"]
+        _copy_settle_keys(settle, out, _SETTLE_INT_KEYS, _SETTLE_BOOL_KEYS)
+        extra = _SETTLE_EXTRA[provider]
+        if extra is not None:
+            extra(settle, out)
+    late = _sanitize_late_rewrite(result.get("late_rewrite"))
+    if late is not None:
+        out["late_rewrite"] = late
+    dom = _sanitize_dom_check(result.get("dom_check"))
+    if dom is not None:
+        out["dom_check"] = dom
+    return out or None
+
+
 def bridge_enabled():
     return os.getenv("BROWSER_BRIDGE_ENABLED", "0").lower() not in ("", "0", "false", "no", "off")
 
@@ -349,7 +422,7 @@ def parse_browser_result(provider, result, path=None, prompt=None):
         # DOM scrapes can echo the pasted OpenCode prompt before a real answer.
         label = "Gemini" if provider == "gemini" else "Claude"
         raise ProviderUnavailable(f"{label} browser returned the request prompt instead of an answer")
-    return Reply(text, token, finish_reason)
+    return Reply(text, token, finish_reason, bridge_settle=_sanitize_bridge_settle(provider, result))
 
 
 def _browser_text_echoes_prompt(text, prompt):

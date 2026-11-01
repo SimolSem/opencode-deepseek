@@ -21,6 +21,7 @@ SEPARATOR = {
     "dispatch_contract": "------------ dispatch contract---------------",
     "to_provider": "------------ to provider---------------",
     "from_provider": "------------ from provider---------------",
+    "bridge_settle": "------------ bridge settle---------------",
     "to_agent": "------------ to agent---------------",
     "add_chat": "-----------------------------add chat -------------------",
     "search_chat": "-----------------------Search chat--------------------------",

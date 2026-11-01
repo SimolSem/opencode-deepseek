@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.3.18
+// @version      0.3.19
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -253,7 +253,7 @@
     const match = location.pathname.match(/^\/(?:u\/\d+\/)?app\/([\w-]+)$/);
     return match ? "/app/" + match[1] : null;
   };
-  const emitBody = (job, status, binary, conversationPath, requestTurn) => {
+  const emitBody = (job, status, binary, conversationPath, requestTurn, settle, answerText) => {
     if (active?.nonce !== job.nonce) return;
     let encoded = "";
     for (let i = 0; i < binary.length; i += 16384) {
@@ -263,6 +263,9 @@
       nonce: job.nonce, status, body: btoa(encoded),
       ...(typeof conversationPath === "string" ? { path: conversationPath } : {}),
       ...(requestTurn ? { request_turn: requestTurn } : {}),
+      ...(settle && typeof settle === "object" ? { settle } : {}),
+      // Page-local only: the controller compares it with the rendered bubble.
+      ...(typeof answerText === "string" ? { answer_text: answerText } : {}),
     }) }));
   };
   const beginCapture = job => {

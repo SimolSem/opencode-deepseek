@@ -65,6 +65,7 @@ class ToolcallLoggingTests(unittest.TestCase):
                 ("dispatch_contract", {"version": 1}),
                 ("to_provider", "prompt\nexact"),
                 ("from_provider", "reply"),
+                ("bridge_settle", {"source": "wire", "rewrites": 0}),
                 ("to_agent", '{"choices": []}'),
                 ("to_agent", {"choices": [], "content": "Привет"}),
                 ("to_agent", type("Response", (), {"body": b'{"error":{"message":"nope"}}'})()),

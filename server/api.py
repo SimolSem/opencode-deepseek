@@ -340,6 +340,8 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
             record_toolcall_log(trace, "dispatch_contract", receipt)
             reply = client.chat(prompt, req.conversation_id, model_type, thinking, req.search)
             record_toolcall_log(trace, "from_provider", reply.text)
+            if getattr(reply, "bridge_settle", None):
+                record_toolcall_log(trace, "bridge_settle", reply.bridge_settle)
             return reply
     except LoginRequired as exc:
         record_toolcall_error(trace, "from_provider", exc)

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.3.36
+// @version      0.3.37
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -195,13 +195,96 @@
     label();
   }
 
+  // Attached to the next finish so TOOLCALL_LOG sees what happened after emit.
+  let pendingLateRewrite = null;
+  let pendingDomCheck = null;
+  let domCheckToken = null;
   async function finish(result) {
     const job = pending;
     retire();
     if (!job) return;
     finishing = true;
-    try { await rpc("/browser/result", "POST", { ...identity(job), result }); }
+    try {
+      const payload = { ...result };
+      if (pendingLateRewrite && typeof pendingLateRewrite === "object") {
+        payload.late_rewrite = pendingLateRewrite;
+        pendingLateRewrite = null;
+      }
+      if (pendingDomCheck && typeof pendingDomCheck === "object") {
+        payload.dom_check = pendingDomCheck;
+        pendingDomCheck = null;
+      }
+      await rpc("/browser/result", "POST", { ...identity(job), result: payload });
+    }
     finally { finishing = false; }
+  }
+
+  // ---- DOM check (docs/BRIDGE_TRACE_STATS.ru.md): any site with answerSnapshot ----
+  // Rendering turns Markdown into DOM, so the comparison ignores everything but
+  // letters and digits; similarity is the word-multiset overlap in percent.
+  // Markdown round-trips (tables, links, list markers) leave a few percent of
+  // noise: >= 97% overlap with lengths within 5% still counts as the same answer.
+  // coverage is the share of emitted words present in the bubble: a rendered
+  // widget (a mermaid diagram) adds DOM text but keeps coverage near 100%.
+  const domWords = text => String(text || "").toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+  const domCompare = (wire, dom) => {
+    const result = domOverlap(wire, dom);
+    const a = String(wire || "").length, b = String(dom || "").length;
+    const close = Math.abs(a - b) <= Math.max(a, b) * 0.05;
+    return { exact: result.match, match: result.match || (result.similarity >= 97 && close),
+      similarity: result.similarity, coverage: result.coverage };
+  };
+  const domOverlap = (wire, dom) => {
+    const a = domWords(wire), b = domWords(dom);
+    const counts = new Map();
+    for (const word of a) counts.set(word, (counts.get(word) || 0) + 1);
+    let common = 0;
+    for (const word of b) {
+      const left = counts.get(word) || 0;
+      if (left > 0) { common += 1; counts.set(word, left - 1); }
+    }
+    return {
+      match: a.join("") === b.join(""),
+      similarity: a.length + b.length ? Math.round(200 * common / (a.length + b.length)) : 100,
+      coverage: a.length ? Math.round(100 * common / a.length) : 100,
+    };
+  };
+  // After an emit, watch the newest answer bubble (snapshot() returns the
+  // rendered answers, oldest first) until the next job starts (or 15 s) and
+  // record metadata only: whether the final rendered text matches what the
+  // agent received, and how often the bubble changed meanwhile.
+  async function domCheck(wireText, snapshot) {
+    const token = {};
+    domCheckToken = token;
+    const startedAt = performance.now();
+    let last = null, changes = -1, changedAt = startedAt;
+    let ended = "timeout";
+    while (performance.now() - startedAt < 15000) {
+      if (domCheckToken !== token) { ended = "next_job"; break; }
+      let texts = [];
+      try { texts = snapshot() || []; } catch (_) { texts = []; }
+      const dom = texts.length ? String(texts[texts.length - 1] || "") : "";
+      if (dom !== last) { last = dom; changes += 1; changedAt = performance.now(); }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (domCheckToken === token) domCheckToken = null;
+    const dom = last || "";
+    const result = {
+      found: !!dom,
+      ...domCompare(wireText, dom),
+      changes: Math.max(0, changes),
+      stable_ms: Math.max(0, Math.min(10000000, Math.round(performance.now() - changedAt))),
+      wire_len: String(wireText || "").length,
+      dom_len: dom.length,
+      tool_wire: String(wireText || "").includes("```tool_calls"),
+      tool_dom: dom.includes("```tool_calls"),
+      ended,
+    };
+    pendingDomCheck = result;
+    if (!result.match) {
+      try { console.warn("[opencode] rendered answer differs from emitted wire", result); } catch (_) { /* ignore */ }
+    }
+    return result;
   }
 
   button.addEventListener("click", async () => {
@@ -619,6 +702,18 @@
   document.addEventListener("opencode-local-response-v1", async event => {
     let value;
     try { value = JSON.parse(event.detail); } catch (_) { return; }
+    if (value?.late_rewrite && typeof value.late_rewrite === "object") {
+      const note = value.late_rewrite;
+      pendingLateRewrite = {
+        delay_ms: Number.isFinite(note.delay_ms) ? Math.max(0, Math.min(10000000, note.delay_ms | 0)) : 0,
+        tool_before: !!note.tool_before,
+        tool_after: !!note.tool_after,
+      };
+      try {
+        console.warn("[opencode] late rewrite after emit", pendingLateRewrite);
+      } catch (_) { /* ignore */ }
+      return;
+    }
     if (!pending || value?.nonce !== pending.nonce) return;
     if (value.observing === true) {
       pending.sawCapture = true;
@@ -669,13 +764,19 @@
     if (claudeChatgbotPage() && site.provider === "claude") {
       reported = claudeCanonicalPath(reported);
     }
+    if (typeof site.answerSnapshot === "function" && typeof value.answer_text === "string") {
+      void domCheck(value.answer_text, site.answerSnapshot);
+    }
     await finish({ status: value.status, body: value.body, path: reported,
       ...(value.request_turn ? { request_turn: value.request_turn } : {}),
+      ...(value.settle && typeof value.settle === "object" ? { settle: value.settle } : {}),
     }).catch(() => label("OpenCode: ответ не принят"));
   });
 
   async function execute(job) {
     if (!Number.isFinite(job.expires_in) || job.expires_in <= 0) throw new BridgeFailure("Invalid browser job deadline");
+    // The previous answer's DOM check ends before this prompt adds a new bubble.
+    domCheckToken = null;
     const deadline = performance.now() + Math.min(job.expires_in, 1800) * 1000;
     let input = editor();
     // Leftover text from a previous failed bridge attempt matches this job's

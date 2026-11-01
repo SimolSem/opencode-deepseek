@@ -13,6 +13,8 @@ class Reply:
     bridge_notice: Optional[dict] = None
     # Ordered text/tool_call parts for streaming; None keeps the legacy framing.
     parts: Optional[list] = None
+    # Optional tab settle metadata (counts/flags only; never response text).
+    bridge_settle: Optional[dict] = None
 
     def __str__(self) -> str:
         return self.text
